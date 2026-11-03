@@ -1,13 +1,21 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { supabase } from "@/lib/supabase";
+
+const messages: Record<string, string> = {
+  connected: "Gmail connected successfully.",
+  cancelled: "Gmail connection was cancelled.",
+  permission: "Please allow permission to send email, then try again.",
+  invalid: "The connection request expired. Please try again.",
+  failed: "Gmail connection failed. Check the server settings.",
+};
 
 async function authHeaders() {
   const { data, error } = await supabase.auth.getSession();
 
   if (error || !data.session) {
-    throw new Error("Please log out and log in again.");
+    throw new Error("Please log in again.");
   }
 
   return {
@@ -18,48 +26,64 @@ async function authHeaders() {
 export default function GmailConnection() {
   const [email, setEmail] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
-  const [busy, setBusy] = useState(false);
+  const [connecting, setConnecting] = useState(false);
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
 
+  const callbackResult = useRef<string | null>(null);
+  const connectLock = useRef(false);
+
   useEffect(() => {
     let active = true;
+    const controller = new AbortController();
 
     const url = new URL(window.location.href);
     const result = url.searchParams.get("gmail");
 
     if (result) {
-      const messages: Record<string, string> = {
-        connected: "Gmail connected successfully.",
-        cancelled: "Gmail connection was cancelled.",
-        permission: "Allow the send-email permission, then try again.",
-        invalid: "Connection expired or was invalid. Please try again.",
-        failed: "Gmail connection failed. Check the server settings.",
-      };
-
-      setMessage(messages[result] ?? "Please try connecting again.");
+      callbackResult.current = result;
       url.searchParams.delete("gmail");
       window.history.replaceState(null, "", url.toString());
     }
 
     async function load() {
       try {
-        const response = await fetch("/api/gmail/connect", {
-          headers: await authHeaders(),
-          cache: "no-store",
-        });
+        const headers = await authHeaders();
 
-        const result = await response.json();
+        if (!active) return;
 
-        if (!response.ok) {
-          throw new Error(result.error || "Could not check Gmail.");
+        if (callbackResult.current) {
+          setMessage(
+            messages[callbackResult.current] ??
+              "Please try connecting again."
+          );
         }
 
-        if (active) setEmail(result.email);
+        const response = await fetch("/api/gmail/connect", {
+          headers,
+          cache: "no-store",
+          signal: controller.signal,
+        });
+
+        const data = await response.json().catch(() => null);
+
+        if (!response.ok || !data) {
+          throw new Error(
+            data?.error || "Could not check your Gmail connection."
+          );
+        }
+
+        if (active) {
+          setEmail(
+            typeof data.email === "string" ? data.email : null
+          );
+        }
       } catch (error) {
         if (active) {
           setError(
-            error instanceof Error ? error.message : "Could not check Gmail."
+            error instanceof Error
+              ? error.message
+              : "Could not check your Gmail connection."
           );
         }
       } finally {
@@ -71,44 +95,61 @@ export default function GmailConnection() {
 
     return () => {
       active = false;
+      controller.abort();
     };
   }, []);
 
   async function connect() {
-    if (busy) return;
-    setBusy(true);
+    if (connectLock.current) return;
+
+    connectLock.current = true;
+    setConnecting(true);
     setError("");
     setMessage("");
 
     try {
+      const headers = await authHeaders();
+
       const response = await fetch("/api/gmail/connect", {
         method: "POST",
-        headers: await authHeaders(),
+        headers,
       });
 
-      const result = await response.json();
+      const data = await response.json().catch(() => null);
 
-      if (!response.ok) {
-        throw new Error(result.error || "Could not connect Gmail.");
+      if (
+        !response.ok ||
+        typeof data?.url !== "string"
+      ) {
+        throw new Error(
+          data?.error || "Could not start the Gmail connection."
+        );
       }
 
-      window.location.assign(result.url);
+      window.location.assign(data.url);
     } catch (error) {
       setError(
-        error instanceof Error ? error.message : "Could not connect Gmail."
+        error instanceof Error
+          ? error.message
+          : "Could not start the Gmail connection."
       );
-      setBusy(false);
+
+      connectLock.current = false;
+      setConnecting(false);
     }
   }
 
   return (
     <section className="rounded-2xl border border-slate-200 bg-white p-6">
-      <div className="flex flex-col justify-between gap-4 sm:flex-row sm:items-center">
+      <div className="flex flex-wrap items-center justify-between gap-4">
         <div>
-          <h2 className="text-lg font-semibold">Email connection</h2>
+          <h2 className="text-lg font-semibold">
+            Email connection
+          </h2>
+
           <p className="mt-1 break-words text-sm text-slate-500">
             {loading
-              ? "Checking Gmail..."
+              ? "Checking your Gmail connection..."
               : email
                 ? `Connected inbox: ${email}`
                 : "Connect the Gmail inbox you use for customer follow-ups."}
@@ -116,28 +157,36 @@ export default function GmailConnection() {
         </div>
 
         <button
-          disabled={loading || busy}
+          type="button"
+          disabled={loading || connecting}
           onClick={() => void connect()}
-          className="rounded-xl bg-indigo-600 px-4 py-3 text-sm font-semibold text-white hover:bg-indigo-700 disabled:opacity-50"
+          className="rounded-xl bg-indigo-600 px-5 py-3 text-sm font-semibold text-white hover:bg-indigo-700 disabled:cursor-not-allowed disabled:opacity-50"
         >
-          {busy ? "Connecting..." : email ? "Reconnect Gmail" : "Connect Gmail"}
+          {connecting
+            ? "Opening Google..."
+            : email
+              ? "Reconnect Gmail"
+              : "Connect Gmail"}
         </button>
       </div>
 
       {message && (
-        <p role="status" className="mt-4 text-sm text-indigo-700">
+        <p
+          role="status"
+          className="mt-4 text-sm text-indigo-700"
+        >
           {message}
         </p>
       )}
 
       {error && (
-        <p role="alert" className="mt-4 text-sm text-red-600">
+        <p role="alert" className="mt-4 text-sm text-red-700">
           {error}
         </p>
       )}
 
       <p className="mt-4 text-xs text-slate-400">
-        Connecting does not send any email. Sending will be added next.
+        Send emails from an estimate’s Open follow-up panel.
       </p>
     </section>
   );
